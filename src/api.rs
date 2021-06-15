@@ -1,4 +1,5 @@
 use std::fmt;
+use std::error::Error;
 
 use oauth2::basic::BasicClient;
 use oauth2::reqwest::http_client;
@@ -12,17 +13,31 @@ pub const AUTH_URL: &str = "https://osu.ppy.sh/oauth/authorize";
 pub const TOKEN_URL: &str = "https://osu.ppy.sh/oauth/token";
 
 #[derive(Debug, Clone)]
-pub enum ApiError {
-    InitializationError,
-    CSRFError,
-    RequestTokenError,
+pub struct ApiError {
+    details: String
 }
 
-// TODO: impl std::error::Error for ApiError {}
+impl ApiError {
+    fn new(msg: &str) -> ApiError {
+        ApiError{details: msg.to_string()}
+    }
+}
+
+impl Error for ApiError {
+    fn description(&self) -> &str {
+        &self.details
+    }
+}
+
+impl fmt::Display for ApiError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.details)
+    }
+}
 
 impl std::convert::From<ParseError> for ApiError {
     fn from(_error: ParseError) -> Self {
-        ApiError::InitializationError
+        ApiError::new(&_error.to_string())
     }
 }
 
@@ -105,7 +120,7 @@ pub fn exchange_code(
     server_state: String,
 ) -> Result<String, ApiError> {
     if state.csrf_token.secret().as_str() != server_state {
-        Err(ApiError::CSRFError)
+        Err(ApiError::new("Server returned a different CSRF token -- unable to recover (incorrectly setup client?)"))
     } else {
         let client = BasicClient::new(
             state.client_id,
@@ -121,7 +136,7 @@ pub fn exchange_code(
 
         match req.request(http_client) {
             Ok(resp) => Ok(resp.access_token().secret().to_string()),
-            Err(_) => Err(ApiError::RequestTokenError),
+            Err(e) => Err(ApiError::new(&format!("Failed to request a token from osu! api: {}", e))),
         }
     }
 }
