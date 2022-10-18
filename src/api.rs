@@ -1,5 +1,10 @@
-use std::fmt;
 use std::error::Error;
+use std::fmt;
+
+use std::{
+    io::{prelude::*, BufReader},
+    net::TcpListener,
+};
 
 use oauth2::basic::BasicClient;
 use oauth2::reqwest::http_client;
@@ -8,18 +13,21 @@ use oauth2::{
     AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge, RedirectUrl,
     TokenResponse, TokenUrl,
 };
+use reqwest::Url;
 
 pub const AUTH_URL: &str = "https://osu.ppy.sh/oauth/authorize";
 pub const TOKEN_URL: &str = "https://osu.ppy.sh/oauth/token";
 
 #[derive(Debug, Clone)]
 pub struct ApiError {
-    details: String
+    details: String,
 }
 
 impl ApiError {
     fn new(msg: &str) -> ApiError {
-        ApiError{details: msg.to_string()}
+        ApiError {
+            details: msg.to_string(),
+        }
     }
 }
 
@@ -77,15 +85,15 @@ pub struct OAuthIntermediateState {
     csrf_token: oauth2::CsrfToken,
 }
 
-pub fn request_grant(
+fn prepare_oauth_request(
     client_id: i32,
-    client_secret: String,
-    redirect_url: String,
+    client_secret: &str,
+    redirect_url: &str,
     scopes: &[Scope],
 ) -> Result<OAuthIntermediateState, ApiError> {
     let client_id = ClientId::new(client_id.to_string());
-    let client_secret = ClientSecret::new(client_secret);
-    let redirect_url = RedirectUrl::new(redirect_url)?;
+    let client_secret = ClientSecret::new(client_secret.to_owned());
+    let redirect_url = RedirectUrl::new(redirect_url.to_owned())?;
 
     let client = BasicClient::new(
         client_id.clone(),
@@ -103,21 +111,20 @@ pub fn request_grant(
     req = req.set_pkce_challenge(pkce_challenge);
 
     let (auth_url, csrf_token) = req.url();
-
     Ok(OAuthIntermediateState {
-        client_id: client_id,
-        client_secret: client_secret,
-        redirect_url: redirect_url.clone(),
-        pkce_verifier: pkce_verifier,
-        auth_url: auth_url,
-        csrf_token: csrf_token,
+        client_id,
+        client_secret,
+        redirect_url,
+        pkce_verifier,
+        auth_url,
+        csrf_token,
     })
 }
 
 pub fn exchange_code(
     state: OAuthIntermediateState,
-    auth_code: String,
-    server_state: String,
+    auth_code: &str,
+    server_state: &str,
 ) -> Result<String, ApiError> {
     if state.csrf_token.secret().as_str() != server_state {
         Err(ApiError::new("Server returned a different CSRF token -- unable to recover (incorrectly setup client?)"))
@@ -131,12 +138,69 @@ pub fn exchange_code(
         .set_redirect_uri(state.redirect_url);
 
         let req = client
-            .exchange_code(AuthorizationCode::new(auth_code))
+            .exchange_code(AuthorizationCode::new(auth_code.to_string()))
             .set_pkce_verifier(state.pkce_verifier);
 
         match req.request(http_client) {
             Ok(resp) => Ok(resp.access_token().secret().to_string()),
-            Err(e) => Err(ApiError::new(&format!("Failed to request a token from osu! api: {}", e))),
+            Err(e) => Err(ApiError::new(&format!(
+                "Failed to request a token from osu! API: {}",
+                e
+            ))),
         }
     }
+}
+
+// Block on listening on localhost:{port} until anything hits, then extract server code and state from the query string.
+fn listen_for_code(redirect_url: &str, local_port: i16) -> (String, String) {
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", local_port))
+        .unwrap_or_else(|e| panic!("Failed to listen on port {}: {}", local_port, e));
+    let mut stream = listener.incoming().next().unwrap().unwrap();
+    let buf_reader = BufReader::new(&mut stream);
+
+    // "GET /?code=...&state=... HTTP/1.1"
+    let http_method_call = buf_reader.lines().next().unwrap().unwrap();
+    let path = http_method_call
+        .split_ascii_whitespace()
+        .find(|chunk| chunk.starts_with('/'))
+        .unwrap_or_else(|| panic!("Malformed HTTP method call: {}", http_method_call));
+
+    let status_line = "HTTP/1.1 200 OK";
+    let contents =
+        "<html><body>Server response fetched, now please head back to the console.<br/><span style='margin:20px;'>&mdash; osu-api library</span></body></html>";
+    let length = contents.len();
+    let response = format!("{status_line}\r\nContent-Length: {length}\r\n\r\n{contents}");
+    stream.write_all(response.as_bytes()).unwrap();
+
+    let mut parsed_qs = std::collections::HashMap::<String, String>::new();
+    let url = Url::parse(&format!("{}{}", redirect_url, path)).unwrap();
+    url.query_pairs().for_each(|p| {
+        parsed_qs.insert(p.0.to_string(), p.1.to_string());
+    });
+
+    (parsed_qs["code"].to_owned(), parsed_qs["state"].to_owned())
+}
+
+pub(crate) fn get_token(
+    client_id: i32,
+    client_secret: &str,
+    local_port: i16,
+    scopes: &[Scope]
+) -> Result<String, Box<dyn Error>> {
+    let redirect_url = format!("http://localhost:{}", local_port);
+    prepare_oauth_request(
+        client_id,
+        client_secret,
+        &redirect_url,
+        &scopes,
+    )
+    .and_then(|state| {
+        eprintln!(
+            "Open the following URL to get access to osu! API: {}",
+            state.auth_url
+        );
+        let (auth_code, auth_state) = listen_for_code(&redirect_url, local_port);
+        exchange_code(state, &auth_code, &auth_state)
+    })
+    .map_err(|e| e.into())
 }
