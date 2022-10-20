@@ -76,6 +76,18 @@ impl fmt::Display for Scope {
     }
 }
 
+impl std::convert::From<&Scope> for oauth2::Scope {
+    fn from(s: &Scope) -> Self {
+        Self::new(s.to_string())
+    }
+}
+
+impl std::convert::From<Scope> for oauth2::Scope {
+    fn from(s: Scope) -> Self {
+        Self::new(s.to_string())
+    }
+}
+
 pub struct OAuthIntermediateState {
     pub client_id: ClientId,
     pub client_secret: ClientSecret,
@@ -85,7 +97,7 @@ pub struct OAuthIntermediateState {
     csrf_token: oauth2::CsrfToken,
 }
 
-fn prepare_oauth_request(
+pub(crate) fn prepare_oauth_request(
     client_id: i32,
     client_secret: &str,
     redirect_url: &str,
@@ -104,9 +116,8 @@ fn prepare_oauth_request(
     .set_redirect_uri(redirect_url.clone());
 
     let mut req = client.authorize_url(CsrfToken::new_random);
-    for scope in scopes.iter() {
-        req = req.add_scope(oauth2::Scope::new(scope.to_string()));
-    }
+    req = req.add_scopes(scopes.iter().map(|s| s.into()));
+
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
     req = req.set_pkce_challenge(pkce_challenge);
 
@@ -152,7 +163,7 @@ pub fn exchange_code(
 }
 
 // Block on listening on localhost:{port} until anything hits, then extract server code and state from the query string.
-fn listen_for_code(redirect_url: &str, local_port: i16) -> (String, String) {
+pub(crate) fn listen_for_code(redirect_url: &str, local_port: i16) -> (String, String) {
     let listener = TcpListener::bind(format!("127.0.0.1:{}", local_port))
         .unwrap_or_else(|e| panic!("Failed to listen on port {}: {}", local_port, e));
     let mut stream = listener.incoming().next().unwrap().unwrap();
@@ -179,28 +190,4 @@ fn listen_for_code(redirect_url: &str, local_port: i16) -> (String, String) {
     });
 
     (parsed_qs["code"].to_owned(), parsed_qs["state"].to_owned())
-}
-
-pub(crate) fn get_token(
-    client_id: i32,
-    client_secret: &str,
-    local_port: i16,
-    scopes: &[Scope]
-) -> Result<String, Box<dyn Error>> {
-    let redirect_url = format!("http://localhost:{}", local_port);
-    prepare_oauth_request(
-        client_id,
-        client_secret,
-        &redirect_url,
-        &scopes,
-    )
-    .and_then(|state| {
-        eprintln!(
-            "Open the following URL to get access to osu! API: {}",
-            state.auth_url
-        );
-        let (auth_code, auth_state) = listen_for_code(&redirect_url, local_port);
-        exchange_code(state, &auth_code, &auth_state)
-    })
-    .map_err(|e| e.into())
 }
