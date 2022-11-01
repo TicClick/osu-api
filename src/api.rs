@@ -24,18 +24,14 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    fn new(msg: &str) -> ApiError {
+    pub(crate) fn new(msg: &str) -> ApiError {
         ApiError {
             details: msg.to_string(),
         }
     }
 }
 
-impl Error for ApiError {
-    fn description(&self) -> &str {
-        &self.details
-    }
-}
+impl Error for ApiError {}
 
 impl fmt::Display for ApiError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {

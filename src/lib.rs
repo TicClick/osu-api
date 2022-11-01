@@ -2,11 +2,52 @@ pub mod api;
 
 use std::error::Error;
 
+use api::ApiError;
 use oauth2::{
     basic::BasicClient, reqwest::http_client, AuthUrl, ClientId, ClientSecret, TokenResponse,
     TokenUrl,
 };
 use reqwest::{blocking, header};
+
+pub const REQUESTS_PER_MINUTE_LIMIT: usize = 1200;
+const RATELIMIT_HDR: &str = "x-ratelimit-limit";
+const RATELIMIT_REMAINING_HDR: &str = "x-ratelimit-remaining";
+
+#[derive(Debug)]
+pub struct RateLimit {
+    pub limit: i32,
+    pub remaining: i32,
+}
+
+impl RateLimit {
+    pub fn from_response(r: &blocking::Response) -> Result<Self, ApiError> {
+        let limit = match r.headers().get(RATELIMIT_HDR) {
+            Some(limit_val) => limit_val.to_str().unwrap().parse().unwrap_or(0),
+            None => return Err(ApiError::new("Unable to detect rate limit")),
+        };
+        let remaining = match r.headers().get(RATELIMIT_REMAINING_HDR) {
+            Some(remaining_val) => remaining_val.to_str().unwrap().parse().unwrap_or(0),
+            None => return Err(ApiError::new("Unable to detect remaining no. of requests")),
+        };
+        Ok(Self { limit, remaining })
+    }
+}
+
+pub fn check_rate_limit(api: &blocking::Client, url: &str) -> Result<RateLimit, ApiError> {
+    match api.get(url).send() {
+        Ok(response) => {
+            if response.status().is_success() {
+                RateLimit::from_response(&response)
+            } else {
+                Err(ApiError::new(&format!(
+                    "Failed to check rate limit: HTTP {}",
+                    response.status()
+                )))
+            }
+        }
+        Err(e) => Err(ApiError::new(&format!("Failed to check rate limit: {}", e))),
+    }
+}
 
 /// Create an osu! API v2 client with OAuth2 bearer token (may be obtained from [`get_token`]).
 pub fn new(raw_token: String) -> blocking::Client {
